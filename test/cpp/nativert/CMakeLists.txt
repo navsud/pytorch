@@ -43,11 +43,15 @@ set(NATIVERT_TEST_SRCS
   ${TORCH_ROOT}/torch/nativert/kernels/TritonKernel.cpp
   ${TORCH_ROOT}/torch/nativert/executor/triton/CpuTritonKernelManager.cpp
   ${TORCH_ROOT}/torch/nativert/executor/DelegateExecutor.cpp
+  ${TORCH_ROOT}/torch/nativert/executor/AOTInductorDelegateExecutor.cpp
+  ${TORCH_ROOT}/torch/nativert/kernels/ETCallDelegateKernel.cpp
+  ${TORCH_ROOT}/torch/csrc/inductor/aoti_torch/oss_proxy_executor.cpp
 )
 
 if(USE_CUDA)
   list(APPEND NATIVERT_TEST_SRCS ${TORCH_ROOT}/torch/nativert/executor/triton/CudaTritonKernelManager.cpp)
-endif(MSVC)
+  list(APPEND NATIVERT_TEST_SRCS ${TORCH_ROOT}/torch/nativert/executor/AOTInductorModelContainerCudaShim.cpp)
+endif()
 
 
 add_executable(test_nativert
