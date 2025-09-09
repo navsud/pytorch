@@ -34,236 +34,162 @@
 Definition of CuTe Layouts and functions to manipulate them
 """
 
-from functools import reduce
-from itertools import chain
+import math
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing_extensions import TypeGuard
 
 
-class Integer:
-    @classmethod
-    def __subclasshook__(cls, c):  # type: ignore[no-untyped-def]
-        if c in [bool, float]:
-            return False
+IntTuple = tuple[int, ...]
 
-        return issubclass(c, int)
+from typing import TypeAlias, Union
 
 
-class LayoutBase:
-    pass
+NestedIntTuple: TypeAlias = tuple["int | NestedIntTuple", ...]
 
 
-def is_tuple(x):  # type: ignore[no-untyped-def]
-    return isinstance(x, tuple)
+@dataclass(frozen=True)
+class _Layout:
+    _sizes: NestedIntTuple
+    _strides: NestedIntTuple
 
+    def __post_init__(self) -> None:
+        if len(_Layout.flatten(self._sizes)) != len(_Layout.flatten(self._strides)):
+            raise ValueError(
+                f"sizes {len(_Layout.flatten(self._sizes))} and "
+                f"strides {len(_Layout.flatten(self._strides))} must have the same length"
+            )
 
-def is_int(x):  # type: ignore[no-untyped-def]
-    return isinstance(x, Integer)
+    @property
+    def sizes(self) -> NestedIntTuple:
+        return self._sizes
 
+    @property
+    def strides(self) -> NestedIntTuple:
+        return self._strides
 
-def flatten(t):  # type: ignore[no-untyped-def]
-    if is_tuple(t):
-        if len(t) == 0:
-            return ()
-        else:
-            return tuple(i for a in t for i in flatten(a))
-    else:
-        return (t,)
+    @property
+    def sizes_and_strides(self) -> Iterator[tuple[int, int]]:
+        return zip(_Layout.flatten(self._sizes), _Layout.flatten(self._strides))
 
-
-def product(a):  # type: ignore[no-untyped-def]
-    if is_tuple(a):
-        return reduce(lambda val, elem: val * product(elem), a, 1)
-    else:
-        return a
-
-
-# Exclusive prefix product with output congruent to input a
-def prefix_product(a, init=1):  # type: ignore[no-untyped-def]
-    if is_tuple(a):
-        if is_tuple(init):  # tuple tuple
-            assert len(a) == len(init)
-            return tuple(prefix_product(x, i) for x, i in zip(a, init))
-        else:  # tuple "int"
-            r = []
-            for v in a:
-                r.append(prefix_product(v, init))
-                init = init * product(v)
-            return tuple(r)
-    else:
-        if is_tuple(init):  # "int" tuple
-            raise AssertionError  # Error
-        else:  # "int" "int"
-            return init
-
-
-def is_layout(x):  # type: ignore[no-untyped-def]
-    return isinstance(x, LayoutBase)
-
-
-class Layout(LayoutBase):  # type: ignore[no-untyped-def]
-    def __init__(self, _shape, _stride=None):  # type: ignore[no-untyped-def]
-        self.shape = _shape
-        if _stride is None:
-            self.stride = prefix_product(self.shape)
-        else:
-            self.stride = _stride
-
-    # operator ==
-    def __eq__(self, other):  # type: ignore[no-untyped-def]
-        return self.shape == other.shape and self.stride == other.stride
+    def numel(self) -> int:
+        return math.prod(_Layout.flatten(self.sizes))
 
     # operator len(L)  (len [rank] like tuples)
-    def __len__(self):  # type: ignore[no-untyped-def]
-        if is_tuple(self.shape):
-            return len(self.shape)
-        else:
-            return 1
+    def __len__(self) -> int:
+        return len(_Layout.flatten(self._sizes))
 
     # operator []    (get-i like tuples)
-    def __getitem__(self, i):  # type: ignore[no-untyped-def]
-        if is_tuple(self.shape):
-            return Layout(self.shape[i], self.stride[i])
+    def __getitem__(self, i: int) -> "_Layout":
+        size = self.sizes[i]
+        stride = self.strides[i]
+        if _Layout.is_tuple(size) and _Layout.is_tuple(stride):
+            return _Layout(size, stride)
+        elif isinstance(size, int) and isinstance(stride, int):
+            return _Layout((size,), (stride,))
         else:
-            assert i == 0
-            return Layout(self.shape, self.stride)
+            raise ValueError("size and stride must be either int or tuple")
 
-    # size(layout)   Size of the domain
-    def size(self):  # type: ignore[no-untyped-def]
-        return product(self.shape)
+    @staticmethod
+    def ceil_div(n: int, m: int) -> int:
+        return (n + m - 1) // m
 
-    # print and str
-    def __str__(self):  # type: ignore[no-untyped-def]
-        return f"{self.shape}:{self.stride}"
+    @staticmethod
+    def is_tuple(x: Union[int, NestedIntTuple]) -> TypeGuard[NestedIntTuple]:
+        return isinstance(x, tuple)
 
-    # error msgs and representation
-    def __repr__(self):  # type: ignore[no-untyped-def]
-        return f"Layout({self.shape},{self.stride})"
-
-
-# Make Layout from a list of layouts (each layout it's own mode in the result)
-def make_layout(*layouts):  # type: ignore[no-untyped-def]
-    if len(layouts) == 1 and not is_layout(layouts[0]):
-        layouts = layouts[0]
-
-    shape, stride = zip(*((a.shape, a.stride) for a in layouts))
-    return Layout(shape, stride)
-
-
-# Size of the domain
-def size(layout):  # type: ignore[no-untyped-def]
-    if is_layout(layout):
-        return layout.size()
-    return product(layout)
-
-
-# Layout coalesce -- flatten and combine as many modes as possible while preserving the int-to-int function
-def coalesce(layout, profile=None):  # type: ignore[no-untyped-def]
-    if is_tuple(profile):
-        assert len(layout) >= len(profile)
-        return make_layout(
-            chain(
-                (coalesce(layout[i], profile[i]) for i in range(0, len(profile))),
-                (layout[i] for i in range(len(profile), len(layout))),
-            )
-        )
-
-    result_shape = [1]
-    result_stride = [0]
-    for shape, stride in zip(flatten(layout.shape), flatten(layout.stride)):
-        # skip their shape-1s
-        if shape == 1:
-            continue
-        # replace our shape-1 with anything
-        elif result_shape[-1] == 1:
-            result_shape[-1] = shape
-            result_stride[-1] = stride
-        # merge modes if the shape*stride match
-        elif result_shape[-1] * result_stride[-1] == stride:
-            result_shape[-1] = result_shape[-1] * shape
-        # append a new mode
+    @staticmethod
+    def flatten(t: Union[int, NestedIntTuple]) -> IntTuple:
+        if _Layout.is_tuple(t):
+            if len(t) == 0:
+                return ()
+            else:
+                return tuple(i for a in t for i in _Layout.flatten(a))
         else:
-            result_shape.append(shape)
-            result_stride.append(stride)
+            assert isinstance(t, int)
+            return (t,)
 
-    if len(result_shape) == 1:
-        return Layout(result_shape[0], result_stride[0])
-    else:
-        return Layout(tuple(result_shape), tuple(result_stride))
+    # Layout coalesce -- flatten and combine as many modes as possible while preserving the int-to-int function
+    def coalesce(self) -> "_Layout":
+        sizes: list[int] = []
+        strides: list[int] = []
+        for size, stride in self.sizes_and_strides:
+            # skip their size-1s
+            if size == 1:
+                continue
+            # replace our size-1 with anything
+            elif sizes[-1] == 1:
+                sizes[-1] = size
+                strides[-1] = stride
+            # merge modes if the size*stride match
+            elif sizes[-1] * strides[-1] == stride:
+                sizes[-1] = sizes[-1] * size
+            # append a new mode
+            else:
+                sizes.append(size)
+                strides.append(stride)
 
+        return _Layout(tuple(sizes), tuple(strides))
 
-# Layout composition
-# Use tuples-of-layouts to perform this operation by-mode and None as no-op
-def composition(layoutA, layoutB):  # type: ignore[no-untyped-def]
-    if layoutB is None:
-        return layoutA
-    elif is_int(layoutB):
-        return composition(layoutA, Layout(layoutB))
-    elif is_tuple(layoutB):
-        assert len(layoutA) >= len(layoutB)
-        return make_layout(
-            chain(
-                (composition(layoutA[i], layoutB[i]) for i in range(0, len(layoutB))),
-                (layoutA[i] for i in range(len(layoutB), len(layoutA))),
+    # Layout composition
+    # Use tuples-of-layouts to perform this operation by-mode and None as no-op
+    def composition(self, layout: "_Layout") -> "_Layout":
+        if _Layout.is_tuple(layout.sizes):
+            layouts = (self.composition(layout_i) for layout_i in layout)  # type: ignore[attr-defined]
+            zip_res_sizes, zip_res_strides = zip(
+                *((a.sizes, a.strides) for a in layouts)
             )
-        )
-    elif is_tuple(layoutB.shape):
-        return make_layout(composition(layoutA, layoutB_i) for layoutB_i in layoutB)
+            return _Layout(tuple(zip_res_sizes), tuple(zip_res_strides))
 
-    if layoutB.stride == 0:
-        return Layout(layoutB.shape, 0)
-    else:
-        result_shape = []
-        result_stride = []
-        rest_shape = layoutB.shape
-        rest_stride = layoutB.stride
-        flat_A = coalesce(layoutA)
-        for curr_shape, curr_stride in zip(
-            flatten(flat_A.shape)[:-1], flatten(flat_A.stride)[:-1]
+        res_sizes: list[int] = []
+        res_strides: list[int] = []
+        rest_size = layout.sizes[0]
+        rest_stride = layout.strides[0]
+        assert isinstance(rest_size, int)
+        assert isinstance(rest_stride, int)
+        flat_layout = self.coalesce()
+        for curr_size, curr_stride in zip(
+            _Layout.flatten(flat_layout.sizes)[:-1],
+            _Layout.flatten(flat_layout.sizes)[:-1],
         ):
-            assert curr_shape % rest_stride == 0 or rest_stride % curr_shape == 0
-            new_shape = min(max(1, curr_shape // rest_stride), rest_shape)
+            assert curr_size % rest_stride == 0 or rest_stride % curr_size == 0
+            new_size = min(max(1, curr_size // rest_stride), rest_size)
 
-            if new_shape != 1:
-                result_shape.append(new_shape)
-                result_stride.append(rest_stride * curr_stride)
+            if new_size != 1:
+                res_sizes.append(new_size)
+                res_strides.append(rest_stride * curr_stride)
 
-            rest_shape = rest_shape // new_shape
+            rest_size = rest_size // new_size
             rest_stride = -(
-                -rest_stride // curr_shape
+                -rest_stride // curr_size
             )  # Python exclusive impl: "//" is always floor div so == ceil_div(abs(rest_stride), curr_shape) * signum(rest_stride)
 
-        if rest_shape != 1 or len(result_shape) == 0:
-            result_shape.append(rest_shape)
-            result_stride.append(rest_stride * flatten(flat_A.stride)[-1])
+        if rest_size != 1 or len(res_sizes) == 0:
+            res_sizes.append(rest_size)
+            res_strides.append(rest_stride * _Layout.flatten(flat_layout.strides)[-1])
 
-        if len(result_shape) == 1:
-            return Layout(result_shape[0], result_stride[0])
-        else:
-            return Layout(tuple(result_shape), tuple(result_stride))
+        return _Layout(tuple(res_sizes), tuple(res_strides))
 
+    # Layout complement
+    def complement(self, max_idx: int) -> "_Layout":
+        res_sizes: list[int] = []
+        res_strides: list[int] = []
+        current_idx = 1
 
-# Layout complement
-def complement(layout, max_idx=1):  # type: ignore[no-untyped-def]
-    if is_int(layout):
-        return complement(Layout(layout))
+        sorted_DS = sorted(self.sizes_and_strides)
+        for stride, size in sorted_DS:
+            if stride == 0 or size == 1:
+                continue
 
-    result_shape = []
-    result_stride = []
-    current_idx = 1
+            in_bound = current_idx <= size * stride
+            # To support symbolic value which can't be evaluated now
+            assert (type(in_bound) is not bool) or in_bound
 
-    sorted_DS = sorted(zip(flatten(layout.stride), flatten(layout.shape)))
-    for stride, shape in sorted_DS:
-        if stride == 0 or shape == 1:
-            continue
+            res_sizes.append(stride // current_idx)
+            res_strides.append(current_idx)
+            current_idx = size * stride
 
-        in_bound = current_idx <= shape * stride
-        # To support symbolic value which can't be evaluated now
-        assert (type(in_bound) is not bool) or in_bound
+        res_sizes.append((max_idx + current_idx - 1) // current_idx)  # ceil_div
+        res_strides.append(current_idx)
 
-        result_shape.append(stride // current_idx)
-        result_stride.append(current_idx)
-        current_idx = shape * stride
-
-    result_shape.append((max_idx + current_idx - 1) // current_idx)  # ceil_div
-    result_stride.append(current_idx)
-
-    return coalesce(Layout(tuple(result_shape), tuple(result_stride)))
+        return _Layout(tuple(res_sizes), tuple(res_strides)).coalesce()
