@@ -628,7 +628,7 @@ class BuiltinMethodVariable(BaseUserFunctionVariable):
         return obj_vt.call_method(tx, name, args, kwargs)
 
 
-class LocalGeneratorObjectVariable(VariableTracker):
+class LocalGeneratorObjectVariable(variables.IteratorVariable):
     def __init__(
         self,
         code: types.CodeType,
